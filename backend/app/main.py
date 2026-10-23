@@ -1,18 +1,8 @@
 """FastAPI application entrypoint."""
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import sys
-import os
-
-# Ensure backend directory is in sys.path so 'app.*' imports work from any working directory
-BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if BACKEND_DIR not in sys.path:
-    sys.path.insert(0, BACKEND_DIR)
-
 from app.core.config import settings
 from app.api.travel import router as travel_router
-
-
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
