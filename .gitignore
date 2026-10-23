@@ -1,0 +1,17 @@
+# Byte-compiled / optimized / cache files
+__pycache__/
+
+# Caches and test artifacts
+.pytest_cache/
+
+# Virtual Environments
+.venv/
+
+# Environment Variables & Secrets
+.env
+*.env
+
+# IDE and OS artifacts
+.vscode/
+.DS_Store
+
