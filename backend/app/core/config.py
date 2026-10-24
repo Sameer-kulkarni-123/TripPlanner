@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     GEMINI_API_KEY: str = ""
     DEFAULT_LLM_MODEL: str = "gemini-1.5-pro"
+
+    # Itinerary Agent: use offline demo activities when no live provider is configured
+    ITINERARY_DEMO_MODE: bool = True
     
     model_config = SettingsConfigDict(
         env_file=".env",
