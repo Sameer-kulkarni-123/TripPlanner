@@ -61,12 +61,38 @@ python .\scripts\test_flight_search.py
 To test the Travel Agent over HTTP:
 
 ```powershell
-uvicorn backend.app.main:app --reload
+uvicorn app.main:app --app-dir backend --reload
 ```
 
 Open your browser to:
 - **Swagger Documentation:** [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - **Health Check:** [http://127.0.0.1:8000/](http://127.0.0.1:8000/)
+
+---
+
+## Itinerary Agent
+
+Implements Section 7 of the TDD: discovers experiences, filters them against hard constraints, scores them, builds a day-by-day schedule and validates it in code.
+
+**Pipeline** (`backend/app/agents/itinerary/`)
+
+1. **Discovery** (`providers/experiences_nuitee.py`) - Nuitee / LiteAPI `GET /experiences/tours` (radius search when coordinates are given, otherwise `textSearch`), then `GET /experiences/tours/{id}/availability` for the top candidates. Without `NUITEE_API_KEY`, and with `ITINERARY_DEMO_MODE=true`, an offline demo provider is used; every demo activity is flagged.
+2. **Filtering & scoring** (`calculations/filtering.py`) - avoid-list, wheelchair needs, child age limits, max price per activity, max duration, date availability, de-duplication; deterministic relevance score (interest match, rating, price, data completeness).
+3. **Scheduling** (`calculations/scheduling.py`) - per-day windows after arrival (+120 min) and departure (-180 min) buffers; pace sets activities per day (relaxed 2 / moderate 3 / packed 4); geographically tight grouping; tries every visiting order to minimise travel and idle time; respects opening hours; inserts lunch, dinner and rest blocks; travel times estimated via haversine (walk <=1.2 km, otherwise transit) and marked as estimates.
+4. **Validation** (`calculations/validation.py`) - overlaps, travel buffers, trip boundaries, duplicates, opening-hour conflicts, availability, budget, unknown price/hours/accessibility. Plans are `validated` only when transport and hotel are confirmed and there are no errors; otherwise `provisional`.
+5. **Targeted revision** (`services/planner.py`) - when arrival/departure changes, only the affected days are rebuilt; preference/date/hotel-location changes trigger a full rebuild.
+
+**Endpoints** (see `/docs`, the example body is prefilled)
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/api/v1/itinerary/activities` | Discover + filter + rank activities |
+| POST | `/api/v1/itinerary/plan` | Build a day-by-day itinerary |
+| POST | `/api/v1/itinerary/revise` | Revise only the affected days |
+
+**Orchestrator hooks** - `ItineraryAgent.execute(dict)`, `ItineraryAgent.execute_from_state(TripState)` (returns a partial state update), `ItineraryAgent.revise(dict)`, and LangChain tools `search_activities` / `plan_itinerary`.
+
+**Tests** - `pytest backend/tests/test_itinerary_agent.py -v`
 
 ---
 
@@ -85,10 +111,18 @@ TripPlanner/
 │   │   ├── core/
 │   │   │   └── config.py             # App settings & credentials
 │   │   ├── api/
-│   │   │   └── travel.py             # /travel API routes
+│   │   │   ├── travel.py             # /travel API routes
+│   │   │   └── itinerary.py          # /itinerary API routes
 │   │   ├── orchestrator/
 │   │   │   └── state.py              # LangGraph shared TripState
 │   │   └── agents/
+│   │       ├── itinerary/            # Itinerary Agent Specialist
+│   │       │   ├── agent.py          # Agent + TripState mapping
+│   │       │   ├── schemas.py        # Request / activity / schedule models
+│   │       │   ├── tools.py          # LangChain tools
+│   │       │   ├── services/planner.py      # discover -> filter -> schedule -> validate -> revise
+│   │       │   ├── providers/        # Nuitee experiences adapter + demo provider
+│   │       │   └── calculations/     # geo, filtering, scheduling, validation
 │   │       └── travel/               # Travel Agent Specialist
 │   │           ├── agent.py          # Agent logic
 │   │           ├── schemas.py        # Pydantic data models
@@ -101,7 +135,8 @@ TripPlanner/
 │   │           └── calculations/
 │   │               └── ranking.py    # Deterministic multi-factor scoring
 │   └── tests/
-│       └── test_travel_agent.py      # Unit tests
+│       ├── test_travel_agent.py      # Travel Agent unit tests
+│       └── test_itinerary_agent.py   # Itinerary Agent unit tests
 └── scripts/
     └── test_flight_search.py         # Live search verification script
 ```
