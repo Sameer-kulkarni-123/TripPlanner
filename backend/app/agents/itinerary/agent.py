@@ -54,7 +54,7 @@ def request_from_trip_state(state: Dict[str, Any]) -> ItineraryRequest:
     for h in state.get("accommodation_options") or []:
         if acc_id and h.get("option_id") == acc_id:
             hotel = {
-                "name": h.get("name"), "latitude": h.get("latitude"), "longitude": h.get("longitude"),
+                "name": h.get("name") or h.get("hotel_name"), "latitude": h.get("latitude"), "longitude": h.get("longitude"),
                 "is_confirmed": True, "selected_accommodation_id": acc_id,
             }
             break

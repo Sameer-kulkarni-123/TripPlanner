@@ -211,6 +211,7 @@ class Activity(BaseModel):
 
     retrieved_at: datetime = Field(default_factory=datetime.utcnow)
     is_demo_data: bool = False
+    is_ai_suggested: bool = Field(default=False, description="Proposed by an LLM; every field is an estimate")
     relevance_score: Optional[float] = None
     matched_interests: List[str] = Field(default_factory=list)
     confidence_flags: List[str] = Field(default_factory=list)

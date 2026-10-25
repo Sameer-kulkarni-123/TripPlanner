@@ -112,6 +112,9 @@ def validate_itinerary(
         issue(Severity.WARNING, "budget_exceeded",
               f"Estimated activity cost {budget_spent} {request.currency} exceeds the activity budget {request.budget.max_total}.")
 
+    if any(a.is_ai_suggested for a in activities):
+        issue(Severity.WARNING, "ai_suggestions",
+              "Activities are AI suggestions from Gemini: names, hours, prices and locations are estimates. Check them before you go.")
     if any(a.is_demo_data for a in activities):
         issue(Severity.WARNING, "demo_data", "Itinerary uses offline DEMO data, not live provider inventory.")
     if not request.transport.is_confirmed:

@@ -1,5 +1,5 @@
 import logging
-from typing import List
+from typing import List, Tuple
 from app.agents.travel.schemas import TravelSearchRequest, TransportOption
 from app.agents.travel.providers.base import BaseTransportProvider
 from app.agents.travel.providers.flight_nuitee import NuiteeFlightProvider
@@ -25,15 +25,23 @@ class TransportSearchService:
         self.providers.append(provider)
 
     async def search_and_rank(self, request: TravelSearchRequest) -> List[TransportOption]:
+        ranked, _ = await self.search_with_limitations(request)
+        return ranked
+
+    async def search_with_limitations(self, request: TravelSearchRequest) -> Tuple[List[TransportOption], List[str]]:
+        """Search, filter and rank, and report why options are missing (provider notes, filters)."""
         all_options: List[TransportOption] = []
+        limitations: List[str] = []
 
         # 1. Query registered providers
         for provider in self.providers:
             try:
-                results = await provider.search(request)
+                results, notes = await provider.search_with_notes(request)
                 all_options.extend(results)
+                limitations.extend(notes)
             except Exception as e:
                 logger.error(f"Provider {provider.name} search failed: {e}")
+                limitations.append(f"Provider {provider.name} failed: {e}")
 
         # 2. Hard constraint filtering (Section 5.2 #8)
         filtered_options: List[TransportOption] = []
@@ -56,6 +64,10 @@ class TransportSearchService:
 
             filtered_options.append(opt)
 
+        removed = len(all_options) - len(filtered_options)
+        if removed:
+            limitations.append(f"{removed} option(s) removed by hard constraints (fare, duration, transfers or times).")
+
         # 3. Deterministic ranking (Section 5.10)
         ranked = rank_transport_options(filtered_options, request.preferences)
-        return ranked
+        return ranked, limitations

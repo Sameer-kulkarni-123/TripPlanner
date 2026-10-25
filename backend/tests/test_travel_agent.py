@@ -111,3 +111,36 @@ async def test_transport_search_service_filtering():
     results = await service.search_and_rank(req)
     assert len(results) == 1
     assert results[0].option_id == "mock-1"
+
+
+@pytest.mark.asyncio
+async def test_missing_key_is_reported_not_silent():
+    from app.agents.travel.providers.flight_nuitee import NuiteeFlightProvider
+    provider = NuiteeFlightProvider(api_key="", base_url="https://example.invalid")
+    provider.api_key = ""
+    service = TransportSearchService(providers=[provider])
+    req = TravelSearchRequest(origin="BLR", destination="CDG", departure_date=date(2026, 12, 8))
+    options, limitations = await service.search_with_limitations(req)
+    assert options == []
+    assert any("NUITEE_API_KEY" in l for l in limitations)
+
+
+@pytest.mark.asyncio
+async def test_http_error_and_empty_results_are_explained(monkeypatch):
+    import httpx
+    from app.agents.travel.providers.flight_nuitee import NuiteeFlightProvider
+
+    responses = iter([httpx.Response(403, text="forbidden"), httpx.Response(200, json={"data": []})])
+
+    async def fake_post(self, url, json=None, headers=None):
+        return next(responses)
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    service = TransportSearchService(providers=[NuiteeFlightProvider(api_key="sand_test", base_url="https://x")])
+    req = TravelSearchRequest(origin="BLR", destination="CDG", departure_date=date(2026, 12, 8))
+
+    _, lim1 = await service.search_with_limitations(req)
+    assert any("HTTP 403" in l and "Flights is enabled" in l for l in lim1)
+
+    _, lim2 = await service.search_with_limitations(req)
+    assert any("no fares" in l and "sandbox" in l for l in lim2)
