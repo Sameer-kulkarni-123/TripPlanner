@@ -1,0 +1,71 @@
+# Render Blueprint for Planless (TripPlanner)
+# Deploy: Render Dashboard -> New -> Blueprint -> connect this GitHub repo -> Apply.
+# Creates two services:
+#   planless-api  FastAPI backend (Python web service)
+#   planless-web  React/Vite frontend (static site)
+#
+# Branch: the web app currently lives on feature/itinerary-agent. Once it's merged into
+# main, change both `branch:` lines to main (or delete them to use the repo default).
+
+services:
+  # ---------- Backend: FastAPI + LangGraph agents ----------
+  - type: web
+    name: planless-api
+    runtime: python
+    plan: free
+    region: singapore
+    branch: feature/itinerary-agent
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      # Secrets: Render asks for these when you first apply the Blueprint
+      - key: NUITEE_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      # Non-secret config (same defaults as .env.example)
+      - key: NUITEE_API_BASE_URL
+        value: https://api.liteapi.travel/v3.0
+      - key: GEMINI_MODEL
+        value: gemini-3.8-flash
+      - key: GEMINI_FALLBACK_MODELS
+        value: gemini-3.5-flash-lite,gemini-2.5-flash
+      - key: ITINERARY_AI_ACTIVITIES
+        value: "true"
+      - key: ITINERARY_DEMO_MODE
+        value: "true"
+      - key: HOTEL_SEARCH_MAX_HOTELS
+        value: "50"
+
+  # ---------- Frontend: Planless web app ----------
+  - type: web
+    name: planless-web
+    runtime: static
+    branch: feature/itinerary-agent
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./dist
+    autoDeploy: true
+    pullRequestPreviewsEnabled: false
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Public URL of planless-api, baked in at build time. If Render gives the API a
+      # different URL (e.g. planless-api-ab12.onrender.com), update this and redeploy.
+      - key: VITE_API_BASE
+        value: https://planless-api.onrender.com
+    routes:
+      # Single-page app: serve index.html for every path
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /assets/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable

@@ -17,6 +17,7 @@ from app.agents.itinerary.calculations.scheduling import (
 from app.agents.itinerary.calculations.validation import validate_itinerary
 from app.agents.itinerary.providers.base import BaseExperienceProvider
 from app.agents.itinerary.providers.demo import DemoExperienceProvider
+from app.agents.itinerary.providers.experiences_gemini import GeminiExperienceProvider
 from app.agents.itinerary.providers.experiences_nuitee import NuiteeExperienceProvider
 from app.agents.itinerary.schemas import (
     Activity,
@@ -39,38 +40,66 @@ MAX_ALTERNATIVES = 10
 
 
 class ItineraryPlanner:
-    def __init__(self, providers: Optional[List[BaseExperienceProvider]] = None, demo_fallback: Optional[bool] = None):
-        self.providers = providers if providers is not None else [NuiteeExperienceProvider()]
+    """Discovery order: live providers (Nuitee) -> Gemini suggestions -> offline demo data.
+
+    The Gemini fallback is only wired in for the default production planner (providers=None) or
+    when an `ai_provider` is passed explicitly, so tests never call a live model by accident.
+    """
+
+    def __init__(
+        self,
+        providers: Optional[List[BaseExperienceProvider]] = None,
+        demo_fallback: Optional[bool] = None,
+        ai_provider: Optional[BaseExperienceProvider] = None,
+    ):
+        default = providers is None
+        self.providers = [NuiteeExperienceProvider()] if default else providers
         self.demo_fallback = settings.ITINERARY_DEMO_MODE if demo_fallback is None else demo_fallback
         self.demo_provider = DemoExperienceProvider()
+        if ai_provider is not None:
+            self.ai_provider: Optional[BaseExperienceProvider] = ai_provider
+        elif default and settings.ITINERARY_AI_ACTIVITIES:
+            self.ai_provider = GeminiExperienceProvider()
+        else:
+            self.ai_provider = None
 
     # ------------------------------------------------------------------ discovery
-    async def _active_providers(self) -> Tuple[List[BaseExperienceProvider], List[str]]:
-        active = [p for p in self.providers if await p.is_available()]
-        if active:
-            return active, []
-        if self.demo_fallback:
-            return [self.demo_provider], []
-        return [], ["No experience provider is configured (set NUITEE_API_KEY or enable ITINERARY_DEMO_MODE)."]
-
-    async def discover(self, request: ItineraryRequest) -> Tuple[List[Activity], List[str]]:
-        providers, limitations = await self._active_providers()
+    async def _run(self, providers: List[BaseExperienceProvider], request: ItineraryRequest) -> Tuple[List[Activity], List[str]]:
         results = await asyncio.gather(*(p.search(request) for p in providers), return_exceptions=True)
         activities: List[Activity] = []
+        notes: List[str] = []
         for p, r in zip(providers, results):
             if isinstance(r, Exception):
                 logger.error(f"Provider {p.name} failed: {r}")
-                limitations.append(f"{p.name} failed: {r}")
+                notes.append(f"{p.name} failed: {r}")
                 continue
             activities.extend(r.activities)
-            limitations.extend(r.limitations)
+            notes.extend(r.limitations)
+        return activities, notes
 
-        # Fall back to demo data if live providers returned nothing at all.
-        if not activities and self.demo_fallback and providers and not isinstance(providers[0], DemoExperienceProvider):
+    async def discover(self, request: ItineraryRequest) -> Tuple[List[Activity], List[str]]:
+        live = [p for p in self.providers if await p.is_available()]
+        activities, limitations = await self._run(live, request) if live else ([], [])
+        used: List[BaseExperienceProvider] = list(live)
+
+        if not activities and self.ai_provider is not None and await self.ai_provider.is_available():
+            ai_acts, ai_notes = await self._run([self.ai_provider], request)
+            if live:
+                limitations.append("Live experiences returned nothing, so Gemini suggestions were used instead.")
+            activities, limitations = ai_acts, limitations + ai_notes
+            used = [self.ai_provider]
+
+        if not activities and self.demo_fallback:
             demo = await self.demo_provider.search(request)
             activities, limitations = demo.activities, limitations + demo.limitations
+            used = [self.demo_provider]
 
-        await self._enrich_availability(activities, request, providers)
+        if not activities and not live and not self.demo_fallback and \
+                not (self.ai_provider is not None and await self.ai_provider.is_available()):
+            limitations.append("No experience provider is configured (set NUITEE_API_KEY or GEMINI_API_KEY, "
+                               "or enable ITINERARY_DEMO_MODE).")
+
+        await self._enrich_availability(activities, request, used)
         return activities, limitations
 
     async def _enrich_availability(self, activities: List[Activity], request: ItineraryRequest, providers) -> None:
@@ -150,7 +179,7 @@ class ItineraryPlanner:
             status = PlanStatus.FAILED
             limitations.append("No activities could be scheduled with the given constraints.")
         elif request.transport.is_confirmed and request.hotel.is_confirmed and not has_errors \
-                and not any(a.is_demo_data for a in used):
+                and not any(a.is_demo_data or a.is_ai_suggested for a in used):
             status = PlanStatus.VALIDATED
         else:
             status = PlanStatus.PROVISIONAL

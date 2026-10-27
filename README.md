@@ -56,9 +56,22 @@ python .\scripts\test_flight_search.py
 
 ---
 
+### 3b. Running Live Hotel Search (`test_hotel_search.py`)
+
+```powershell
+python .\scripts\test_hotel_search.py
+```
+
+Searches Paris hotels 30 days ahead via LiteAPI (`GET /data/hotels` for property content, then
+`POST /hotels/rates`), normalizes results into `HotelOption` models, applies hard constraints, and ranks
+them deterministically. Prices are **total stay for all rooms**; fees payable at the property are reported
+separately and included in `all_in_price`.
+
+---
+
 ### 4. Running the FastAPI Server (Interactive Swagger UI)
 
-To test the Travel Agent over HTTP:
+To test the agents over HTTP:
 
 ```powershell
 uvicorn app.main:app --app-dir backend --reload
@@ -69,6 +82,46 @@ Open your browser to:
 - **Health Check:** [http://127.0.0.1:8000/](http://127.0.0.1:8000/)
 
 ---
+
+### 5. Running the Web Frontend
+
+With the API running (step 4), in a second terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev          # http://127.0.0.1:5173
+```
+
+Mobile-first React + Vite + TypeScript client that calls the real endpoints: flights and itinerary in parallel, then hotels ranked against the planned stops, and `/itinerary/revise` when you pick flights or a stay. See [`frontend/README.md`](frontend/README.md).
+
+---
+
+## Gemini, any-city search and the landing page
+
+- **Describe your trip** (`POST /api/v1/assistant/trip-draft`): Gemini extracts destination, dates, travellers, interests and pace from free text. Code then checks the dates and numbers, finds the places on the map and lists anything missing. The form is filled in for review before planning.
+- **Any city** (`GET /api/v1/places/search?q=Mysuru`): coordinates and time zone from the Open-Meteo geocoding API (GeoNames, no key needed), plus the nearest airport from LiteAPI's IATA list. Places with no airport within 250 km skip flight search.
+- **Activities when Nuitee has none**: discovery order is live Nuitee experiences, then Gemini suggestions, then offline demo data. Gemini suggestions are validated (far-away or malformed items dropped), tagged "AI suggestion", and keep the plan `provisional`.
+
+- **Local tips** (`POST /api/v1/insights/local-tips`): Tavily web search runs three queries (scams, advice from locals on reddit.com, things to know), Gemini turns the pages into short tips, and code keeps only tips that cite a page that was actually retrieved. Shown in the **Tips** tab, each tip linked to its sources.
+
+Setup: put `GEMINI_API_KEY=...` and `TAVILY_API_KEY=...` in `.env` and restart uvicorn. Without it, everything else still works and the app says what's missing.
+
+---
+
+### Place search, regions and airports
+
+- Place search covers cities **and** states/regions. "Goa" resolves to the Indian state (based around Panaji, flying into GOI) instead of a small namesake abroad; results in the traveller's own country rank higher.
+- The airport is chosen by distance, but international airports get a head start and fields without airline service are pushed back, so Hyderabad uses HYD, not Begumpet (BPM).
+- If the geocoder finds nothing (nicknames like "Coorg"), Gemini suggests what was meant and each suggestion is kept only if the geocoder confirms a real place near it.
+
+### Checking your API keys
+
+```bash
+python backend/scripts/check_keys.py
+```
+
+Prints one line each for Gemini, Tavily, Nuitee and place search (never the keys). Newer Gemini keys that start with `AQ.` are tried with the header, query-string and bearer styles, then the Interactions API.
 
 ## Itinerary Agent
 
@@ -96,6 +149,27 @@ Implements Section 7 of the TDD: discovers experiences, filters them against har
 
 ---
 
+## Hotel Agent
+
+Implements Section 8 of the TDD: searches Nuitee hotels, normalizes property + room/rate options, filters hard constraints, ranks deterministically, and reports why options are missing instead of relaxing constraints.
+
+**Pipeline** (`backend/app/agents/hotel/`)
+
+1. **Validate stay** (`validation/stay.py`) - dates, nights (<= 30), rooms (<= 5), horizon, currency.
+2. **Search** (`providers/hotel_nuitee.py`) - `GET /data/hotels` for property content, then `POST /hotels/rates` (falls back to city search). Provider failures raise and are reported, never shown as "no hotels".
+3. **Normalize & price** (`calculations/pricing.py`) - total stay for all rooms, per-night price, taxes/fees split into included vs payable at property, `all_in_price`.
+4. **Validate options** (`validation/results.py`) - currency, dates, nights, room count.
+5. **Hard constraints** (`services/search.py`) - max total / per-night price (all-in when known), min stars, refundable only, board type, occupancy, max distance, amenities/accessibility (kept but flagged when the provider gives no amenity data). Removed counts are returned in `rejected_counts`.
+6. **Ranking** (`calculations/ranking.py`) - `S = w_c C + w_q Q + w_l L + w_f F` (cost, stars, distance to reference points, cancellation/meal fit); components with no data are dropped and weights re-normalized.
+
+**Endpoint**: `POST /api/v1/hotel/search`
+
+**Orchestrator hooks** - `HotelAgent.execute(dict)`, `HotelAgent.rerank(dict)` (re-rank by itinerary locations without a new search), LangChain tool `search_hotels`.
+
+**Tests** - `pytest backend/tests/test_hotel_agent.py -v`
+
+---
+
 ## Project Structure
 
 ```
@@ -112,7 +186,8 @@ TripPlanner/
 │   │   │   └── config.py             # App settings & credentials
 │   │   ├── api/
 │   │   │   ├── travel.py             # /travel API routes
-│   │   │   └── itinerary.py          # /itinerary API routes
+│   │   │   ├── itinerary.py          # /itinerary API routes
+│   │   │   └── hotel.py              # /hotel API routes
 │   │   ├── orchestrator/
 │   │   │   └── state.py              # LangGraph shared TripState
 │   │   └── agents/
@@ -123,6 +198,14 @@ TripPlanner/
 │   │       │   ├── services/planner.py      # discover -> filter -> schedule -> validate -> revise
 │   │       │   ├── providers/        # Nuitee experiences adapter + demo provider
 │   │       │   └── calculations/     # geo, filtering, scheduling, validation
+│   │       ├── hotel/                # Hotel Agent Specialist
+│   │       │   ├── agent.py          # Agent logic (execute / rerank)
+│   │       │   ├── schemas.py        # Stay request / HotelOption models
+│   │       │   ├── tools.py          # LangChain tool search_hotels
+│   │       │   ├── services/search.py        # fan-out, validation, hard constraints, ranking
+│   │       │   ├── providers/        # Nuitee hotels adapter
+│   │       │   ├── calculations/     # pricing, distance, ranking
+│   │       │   └── validation/       # stay + result checks
 │   │       └── travel/               # Travel Agent Specialist
 │   │           ├── agent.py          # Agent logic
 │   │           ├── schemas.py        # Pydantic data models
@@ -136,7 +219,27 @@ TripPlanner/
 │   │               └── ranking.py    # Deterministic multi-factor scoring
 │   └── tests/
 │       ├── test_travel_agent.py      # Travel Agent unit tests
-│       └── test_itinerary_agent.py   # Itinerary Agent unit tests
+│       ├── test_itinerary_agent.py   # Itinerary Agent unit tests
+│       └── test_hotel_agent.py       # Hotel Agent unit tests
 └── scripts/
-    └── test_flight_search.py         # Live search verification script
+    ├── test_flight_search.py         # Live flight search verification script
+    └── test_hotel_search.py          # Live hotel search verification script
 ```
+
+## Deploying to Render
+
+The repo ships a Render Blueprint (`render.yaml`) that creates two services:
+
+| Service | Type | What it runs |
+|---|---|---|
+| `planless-api` | Python web service (free) | `uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port $PORT` |
+| `planless-web` | Static site | `npm ci && npm run build` in `frontend/`, publishes `frontend/dist` |
+
+1. Push this branch to GitHub (the Blueprint currently deploys `feature/itinerary-agent`; switch the two `branch:` lines to `main` after merging).
+2. In Render: **New → Blueprint**, connect `Sameer-kulkarni-123/TripPlanner`, and pick the branch that contains `render.yaml`.
+3. When prompted, paste the secrets: `NUITEE_API_KEY`, `GEMINI_API_KEY`, `TAVILY_API_KEY`. Click **Apply**.
+4. Once `planless-api` is live, open its URL — `/` should return `{"status": "healthy", ...}` with the three `*_configured` flags `true`.
+5. Check the API's public URL. If it isn't exactly `https://planless-api.onrender.com`, set `VITE_API_BASE` on `planless-web` to the real URL (Environment tab) and trigger **Manual Deploy → Clear build cache & deploy** (Vite bakes it in at build time).
+6. Open the `planless-web` URL.
+
+Notes: Python 3.11 is pinned via `.python-version` and `PYTHON_VERSION`; Node 22 via `NODE_VERSION`. The free API instance sleeps after ~15 min idle, so the first request can take ~50 s. Never commit `.env` or `api.env` — set keys only in the Render dashboard.

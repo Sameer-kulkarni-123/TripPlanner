@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 from decimal import Decimal
 import httpx
@@ -108,12 +108,16 @@ class NuiteeFlightProvider(BaseTransportProvider):
         return payload
 
     async def search(self, request: TravelSearchRequest) -> List[TransportOption]:
-        """
-        Executes flight search via LiteAPI POST /flights/rates.
-        """
+        """Executes flight search via LiteAPI POST /flights/rates."""
+        options, _ = await self.search_with_notes(request)
+        return options
+
+    async def search_with_notes(self, request: TravelSearchRequest) -> Tuple[List[TransportOption], List[str]]:
+        """Same as search(), plus notes that explain an empty result instead of hiding it."""
+        route = f"{request.origin.upper()} -> {request.destination.upper()} on {request.departure_date.isoformat()}"
         if not self.api_key:
             logger.warning("Nuitee API key not set. Skipping live Nuitee flight search.")
-            return []
+            return [], ["NUITEE_API_KEY is not configured, so live flight search was skipped."]
 
         headers = {
             "accept": "application/json",
@@ -127,16 +131,33 @@ class NuiteeFlightProvider(BaseTransportProvider):
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(url, json=payload, headers=headers)
-                if response.status_code != 200:
-                    logger.error(
-                        f"Nuitee flight search failed: HTTP {response.status_code} - {response.text}"
-                    )
-                    return []
-                data = response.json()
-                return self._parse_nuitee_response(data, request.currency)
         except Exception as e:
             logger.error(f"Error querying Nuitee /flights/rates: {e}")
-            return []
+            return [], [f"Could not reach Nuitee /flights/rates: {e}"]
+
+        if response.status_code != 200:
+            body = response.text[:300]
+            logger.error(f"Nuitee flight search failed: HTTP {response.status_code} - {body}")
+            hint = ""
+            if response.status_code in (401, 403):
+                hint = " Check that NUITEE_API_KEY is valid and that Flights is enabled for the key."
+            return [], [f"Nuitee /flights/rates returned HTTP {response.status_code} for {route}: {body}{hint}"]
+
+        try:
+            data = response.json()
+        except ValueError:
+            return [], [f"Nuitee /flights/rates returned a non-JSON response for {route}."]
+
+        options = self._parse_nuitee_response(data, request.currency)
+        notes: List[str] = []
+        if not options:
+            sandbox = self.api_key.startswith("sand_")
+            notes.append(
+                f"Nuitee returned no fares for {route}."
+                + (" This is a sandbox key, and sandbox flight data is limited; try another route or date."
+                   if sandbox else "")
+            )
+        return options, notes
 
     def _parse_nuitee_response(self, data: dict, currency: str) -> List[TransportOption]:
         """
