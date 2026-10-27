@@ -47,7 +47,12 @@ async function request<T>(path: string, init: RequestInit, signal?: AbortSignal)
     });
   } catch (e) {
     if ((e as Error).name === "AbortError") throw e;
-    throw new ApiError("Can't reach the Planless API. Is uvicorn running on port 8000?", 0);
+    throw new ApiError(
+      import.meta.env.VITE_API_BASE
+        ? "Can't reach the Planless API. It may be waking up (free hosting sleeps when idle) — try again in a minute."
+        : "Can't reach the Planless API. Is uvicorn running on port 8000?",
+      0,
+    );
   }
   const text = await res.text();
   let json: unknown = null;

@@ -225,3 +225,21 @@ TripPlanner/
     ├── test_flight_search.py         # Live flight search verification script
     └── test_hotel_search.py          # Live hotel search verification script
 ```
+
+## Deploying to Render
+
+The repo ships a Render Blueprint (`render.yaml`) that creates two services:
+
+| Service | Type | What it runs |
+|---|---|---|
+| `planless-api` | Python web service (free) | `uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port $PORT` |
+| `planless-web` | Static site | `npm ci && npm run build` in `frontend/`, publishes `frontend/dist` |
+
+1. Push this branch to GitHub (the Blueprint currently deploys `feature/itinerary-agent`; switch the two `branch:` lines to `main` after merging).
+2. In Render: **New → Blueprint**, connect `Sameer-kulkarni-123/TripPlanner`, and pick the branch that contains `render.yaml`.
+3. When prompted, paste the secrets: `NUITEE_API_KEY`, `GEMINI_API_KEY`, `TAVILY_API_KEY`. Click **Apply**.
+4. Once `planless-api` is live, open its URL — `/` should return `{"status": "healthy", ...}` with the three `*_configured` flags `true`.
+5. Check the API's public URL. If it isn't exactly `https://planless-api.onrender.com`, set `VITE_API_BASE` on `planless-web` to the real URL (Environment tab) and trigger **Manual Deploy → Clear build cache & deploy** (Vite bakes it in at build time).
+6. Open the `planless-web` URL.
+
+Notes: Python 3.11 is pinned via `.python-version` and `PYTHON_VERSION`; Node 22 via `NODE_VERSION`. The free API instance sleeps after ~15 min idle, so the first request can take ~50 s. Never commit `.env` or `api.env` — set keys only in the Render dashboard.
