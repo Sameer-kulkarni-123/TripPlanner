@@ -10,11 +10,22 @@ class Settings(BaseSettings):
     NUITEE_API_KEY: str = ""
     NUITEE_API_BASE_URL: str = "https://api.liteapi.travel/v3.0"
 
-    # Hotel Agent: max properties requested from /data/hotels per search
-    HOTEL_SEARCH_MAX_HOTELS: int = 50
+    # Google Places API (New): destination search with landmarks, regions and "near X" queries.
+    # Optional: without it, place search falls back to the free Open-Meteo geocoder.
+    GOOGLE_MAPS_API_KEY: str = ""
+
+    # Hotel Agent: max properties requested from /data/hotels per search (more = more budget stays found)
+    HOTEL_SEARCH_MAX_HOTELS: int = 150
+    # Hotel Agent: search radius around the destination's coordinates (regions/landmarks get the wider one)
+    HOTEL_SEARCH_RADIUS_KM: float = 12
+    HOTEL_SEARCH_REGION_RADIUS_KM: float = 35
     
-    # LLM Settings (can be OpenAI, Google Gemini, Anthropic, or local)
+    # LLM Settings. Providers are tried in LLM_PROVIDER_ORDER; a failing one hands over to the next.
+    # Set e.g. "gemini" to use only Gemini, or "gemini,groq" to flip the order.
+    LLM_PROVIDER_ORDER: str = "groq,gemini"
     OPENAI_API_KEY: str = ""
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
     GEMINI_API_KEY: str = ""
     DEFAULT_LLM_MODEL: str = "gemini-1.5-pro"
     # Gemini model used by app/integrations/gemini.py; the fallbacks are tried in order if a model is not found.

@@ -1,4 +1,4 @@
-import type { PlaceResult } from "../api/types";
+import type { PlaceKind, PlaceResult } from "../api/types";
 
 // Quick picks shown before you type. Any other city comes from GET /api/v1/places/search
 // (Open-Meteo geocoding + the nearest airport from LiteAPI). Each row is reference data the
@@ -16,8 +16,9 @@ export interface Place {
   lat: number;
   lon: number;
   tz: string;
-  /** "region" for states, islands and areas (Goa, Ladakh): searched over a wider radius. */
-  kind?: "city" | "region";
+  /** "region" for states, islands and areas (Goa, Ladakh), "landmark" for lakes, parks, forts...:
+   *  both are searched over a wider radius. */
+  kind?: PlaceKind;
   /** For regions: the town travellers usually stay in, used as the map centre. */
   base?: string | null;
 }

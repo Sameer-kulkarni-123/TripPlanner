@@ -186,7 +186,7 @@ def test_trip_draft_extracts_and_resolves(monkeypatch):
         return [{"city": name, "country_code": "IN", "latitude": 12.0, "longitude": 76.0, "timezone": "Asia/Kolkata",
                  "airport": None}]
 
-    monkeypatch.setattr(assistant.gemini, "generate_json", fake_gen)
+    monkeypatch.setattr(assistant.llm, "generate_json", fake_gen)
     monkeypatch.setattr(assistant, "search_places", fake_places)
     r = TestClient(app).post("/api/v1/assistant/trip-draft", json={"text": "2 nights in Mysuru from Bengaluru, relaxed"})
     assert r.status_code == 200, r.text

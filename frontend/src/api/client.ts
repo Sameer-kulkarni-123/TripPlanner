@@ -1,15 +1,4 @@
-import type {
-  Health,
-  LocalTips,
-  PlaceResult,
-  TripDraftResult,
-  HotelSearchRequest,
-  HotelSearchResult,
-  ItineraryRequest,
-  ItineraryResult,
-  TravelSearchRequest,
-  TravelSearchResult,
-} from "./types";
+import type { Health, HotelSearchRequest, HotelSearchResult, ItineraryRequest, ItineraryResult, LocalTips, PlaceAutocomplete, PlaceResult, TravelSearchRequest, TravelSearchResult, TripDraftResult } from "./types";
 
 /** Dev: "/__backend" (proxied by Vite). Production: set VITE_API_BASE to the FastAPI origin. */
 const BASE = (import.meta.env.VITE_API_BASE as string | undefined)?.replace(/\/$/, "") || "/__backend";
@@ -83,6 +72,14 @@ export const api = {
   searchPlaces: (q: string, signal?: AbortSignal, prefer?: string) =>
     request<{ query: string; results: PlaceResult[] }>(
       `/places/search?q=${encodeURIComponent(q)}&count=8${prefer ? `&prefer=${encodeURIComponent(prefer)}` : ""}`,
+      { method: "GET" }, signal),
+  autocompletePlaces: (q: string, session: string, signal?: AbortSignal, prefer?: string) =>
+    request<PlaceAutocomplete>(
+      `/places/autocomplete?q=${encodeURIComponent(q)}&session=${encodeURIComponent(session)}${prefer ? `&prefer=${encodeURIComponent(prefer)}` : ""}`,
+      { method: "GET" }, signal),
+  placeDetails: (placeId: string, session: string, signal?: AbortSignal) =>
+    request<PlaceResult>(
+      `/places/details?place_id=${encodeURIComponent(placeId)}&session=${encodeURIComponent(session)}`,
       { method: "GET" }, signal),
   localTips: (body: { city: string; country: string }, signal?: AbortSignal) =>
     post<LocalTips>("/insights/local-tips", body, signal),

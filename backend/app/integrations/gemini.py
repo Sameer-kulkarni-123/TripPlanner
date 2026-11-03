@@ -14,6 +14,7 @@ from typing import Any, List, Optional
 import httpx
 
 from app.core.config import settings
+from app.integrations.llm_errors import LLMError
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ TRANSIENT = {500, 502, 503, 504}
 RETRY_DELAYS = (1.0, 2.5)
 
 
-class GeminiError(Exception):
+class GeminiError(LLMError):
     """Raised when Gemini is not configured, unreachable, or returns unusable output."""
 
 

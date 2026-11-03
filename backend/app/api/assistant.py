@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.agents.itinerary.calculations.filtering import INTEREST_KEYWORDS
-from app.integrations import gemini
+from app.integrations import llm
 from app.integrations.places import PlacesError, _load_airports, nearest_airport, search_places
 
 router = APIRouter()
@@ -82,8 +82,8 @@ async def _place(name: Optional[str], *, country: Optional[str] = None, prefer: 
 async def trip_draft(req: DraftRequest):
     today = req.today or date.today()
     try:
-        raw = await gemini.generate_json(_prompt(req.text, today), temperature=0.0)
-    except gemini.GeminiError as e:
+        raw = await llm.generate_json(_prompt(req.text, today), temperature=0.0)
+    except llm.LLMError as e:
         raise HTTPException(status_code=503, detail=str(e))
     if not isinstance(raw, dict):
         raise HTTPException(status_code=502, detail="Gemini returned an unexpected format.")

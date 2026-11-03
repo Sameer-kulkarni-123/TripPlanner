@@ -29,6 +29,10 @@ services:
         sync: false
       - key: TAVILY_API_KEY
         sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
       # Non-secret config (same defaults as .env.example)
       - key: NUITEE_API_BASE_URL
         value: https://api.liteapi.travel/v3.0
@@ -41,7 +45,9 @@ services:
       - key: ITINERARY_DEMO_MODE
         value: "true"
       - key: HOTEL_SEARCH_MAX_HOTELS
-        value: "50"
+        value: "150"
+      - key: LLM_PROVIDER_ORDER
+        value: groq,gemini
 
   # ---------- Frontend: Planless web app ----------
   - type: web

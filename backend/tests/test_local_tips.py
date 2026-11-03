@@ -31,7 +31,7 @@ async def fake_search(query, max_results=6, include_domains=None, **kw):
 @pytest.mark.asyncio
 async def test_tips_keep_only_cited_and_dedupe_sources(monkeypatch):
     monkeypatch.setattr(service.tavily, "search", fake_search)
-    monkeypatch.setattr(service.gemini, "is_configured", lambda: True)
+    monkeypatch.setattr(service.llm, "is_configured", lambda: True)
 
     async def fake_gen(prompt, **kw):
         assert "[1] Jaipur scams thread" in prompt and "Gem shop scam" in prompt
@@ -42,7 +42,7 @@ async def test_tips_keep_only_cited_and_dedupe_sources(monkeypatch):
             {"category": "weird", "title": "Out of range", "advice": "Bad ref.", "sources": [99]},
         ]}
 
-    monkeypatch.setattr(service.gemini, "generate_json", fake_gen)
+    monkeypatch.setattr(service.llm, "generate_json", fake_gen)
     r = await service.local_tips("Jaipur", "India")
     assert len(r["sources"]) == 3                                   # duplicate URL removed
     assert [t["title"] for t in r["tips"]] == ["Skip the gem shop detour", "Use app cabs at the station"]
@@ -55,7 +55,7 @@ async def test_tips_keep_only_cited_and_dedupe_sources(monkeypatch):
 @pytest.mark.asyncio
 async def test_without_gemini_returns_sources(monkeypatch):
     monkeypatch.setattr(service.tavily, "search", fake_search)
-    monkeypatch.setattr(service.gemini, "is_configured", lambda: False)
+    monkeypatch.setattr(service.llm, "is_configured", lambda: False)
     r = await service.local_tips("Jaipur", "India")
     assert r["tips"] == [] and len(r["sources"]) == 3
     assert any("GEMINI_API_KEY" in l for l in r["limitations"])

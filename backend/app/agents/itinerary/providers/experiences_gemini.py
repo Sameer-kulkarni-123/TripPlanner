@@ -25,7 +25,7 @@ from app.agents.itinerary.schemas import (
     OpeningHours,
     PriceBasis,
 )
-from app.integrations import gemini
+from app.integrations import llm
 
 logger = logging.getLogger(__name__)
 
@@ -100,13 +100,13 @@ class GeminiExperienceProvider(BaseExperienceProvider):
         return "Gemini (AI suggestions)"
 
     async def is_available(self) -> bool:
-        return gemini.is_configured()
+        return llm.is_configured()
 
     async def search(self, request: ItineraryRequest) -> ProviderSearchResult:
         count = min(MAX_ITEMS, max(10, request.trip_days * PACE_CAPACITY[request.pace] * 2))
         try:
-            data = await gemini.generate_json(build_prompt(request, count), system=SYSTEM)
-        except gemini.GeminiError as e:
+            data = await llm.generate_json(build_prompt(request, count), system=SYSTEM)
+        except llm.LLMError as e:
             return ProviderSearchResult(limitations=[f"Gemini suggestions unavailable: {e}"])
         items = data.get("activities") if isinstance(data, dict) else data
         if not isinstance(items, list):

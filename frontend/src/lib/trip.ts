@@ -125,7 +125,9 @@ export function itineraryRequest(d: Draft): ItineraryRequest {
   };
 }
 
-export function hotelRequest(d: Draft, refs: GeoPoint[], priority = d.hotelPriority): HotelSearchRequest {
+export const hotelRadiusKm = (p: Draft["to"]) => (p.kind === "region" || p.kind === "landmark" ? 35 : 12);
+
+export function hotelRequest(d: Draft, refs: GeoPoint[], priority = d.hotelPriority, radiusKm = hotelRadiusKm(d.to)): HotelSearchRequest {
   const p = d.to;
   const rooms = Array.from({ length: d.rooms }, (_, i) => ({
     adults: Math.max(1, Math.floor(d.adults / d.rooms) + (i < d.adults % d.rooms ? 1 : 0)),
@@ -144,7 +146,13 @@ export function hotelRequest(d: Draft, refs: GeoPoint[], priority = d.hotelPrior
       accessibility_needs: d.stepFree ? ["wheelchair"] : [],
     },
     preferences: { priority, reference_points: refs },
-    max_results: 12,
+    // Search around the destination's coordinates: works for regions (Ladakh) and landmarks, and
+    // picks up guesthouses outside the city limits. Wider for regions and landmarks.
+    latitude: p.lat,
+    longitude: p.lon,
+    radius_km: radiusKm,
+    // Enough stays for the price / star / rating filters in the Stays panel to be useful
+    max_results: 60,
     max_options_per_hotel: 1,
   };
 }
