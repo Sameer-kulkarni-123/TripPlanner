@@ -11,7 +11,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from app.integrations import gemini, tavily
+from app.integrations import llm, tavily
 
 logger = logging.getLogger(__name__)
 
@@ -125,16 +125,16 @@ async def local_tips(city: str, country: str = "") -> Dict[str, Any]:
     summary = None
     if not sources:
         limitations.append(f"The web search found nothing useful about {city}.")
-    elif gemini.is_configured():
+    elif llm.is_configured():
         try:
-            raw = await gemini.generate_json(_prompt(city, country, sources), temperature=0.1)
+            raw = await llm.generate_json(_prompt(city, country, sources), temperature=0.1)
             tips, summary, dropped = validate_tips(raw, sources)
             if dropped:
                 limitations.append(f"{dropped} suggested tip(s) were left out because they didn't cite a retrieved page.")
-        except gemini.GeminiError as e:
-            limitations.append(f"Couldn't summarise with Gemini ({e}); showing the pages found instead.")
+        except llm.LLMError as e:
+            limitations.append(f"Couldn't summarise with the language model ({e}); showing the pages found instead.")
     else:
-        limitations.append("Add GEMINI_API_KEY to .env to turn these pages into short tips; showing the pages found instead.")
+        limitations.append("Add GROQ_API_KEY or GEMINI_API_KEY to .env to turn these pages into short tips; showing the pages found instead.")
 
     result = {
         "destination": city,

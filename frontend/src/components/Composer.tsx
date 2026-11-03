@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { api } from "../api/client";
+import type { PlaceSuggestion } from "../api/types";
 import { CURRENCIES, INTERESTS, PLACES, fromResult, longestWord, placeKey, type Place } from "../data/places";
 import { addDays, coord, daysBetween, plural, todayISO } from "../lib/format";
 import { draftProblem, type Draft } from "../lib/trip";
@@ -26,13 +27,16 @@ function useLocalTime(tz: string) {
   return t;
 }
 
+const KIND_LABEL: Record<string, string> = { region: "Region", landmark: "Landmark" };
+
 function PlaceRow({ p, onPick }: { p: Place; onPick: (p: Place) => void }) {
+  const kind = p.kind && KIND_LABEL[p.kind];
   return (
     <li>
       <button type="button" onClick={() => onPick(p)}>
         <span className="place-list__city">
           {p.city}
-          {p.kind === "region" && <em className="place-list__kind">Region</em>}
+          {kind && <em className="place-list__kind">{kind}</em>}
         </span>
         <span className="place-list__meta">
           {[p.region, p.country].filter(Boolean).join(", ")}
@@ -45,59 +49,117 @@ function PlaceRow({ p, onPick }: { p: Place; onPick: (p: Place) => void }) {
   );
 }
 
-/** Any city or region in the world: quick picks first, then live results from GET /places/search. */
+/** A Google suggestion: shown at once while typing, resolved to coordinates + airport when picked. */
+function SuggestionRow({ s, onPick, resolving }: { s: PlaceSuggestion; onPick: (s: PlaceSuggestion) => void; resolving: boolean }) {
+  const kind = KIND_LABEL[s.kind];
+  return (
+    <li>
+      <button type="button" onClick={() => onPick(s)} disabled={resolving} aria-busy={resolving}>
+        <span className="place-list__city">
+          {s.title}
+          {kind && <em className="place-list__kind">{kind}</em>}
+        </span>
+        <span className="place-list__meta">{s.subtitle ?? ""}</span>
+        <span className="place-list__code">{resolving ? "…" : <Icon name="arrow" size={16} />}</span>
+      </button>
+    </li>
+  );
+}
+
+const newSession = () =>
+  (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+
+/** Any city, region or landmark in the world: quick picks first, then live results.
+ *  With Google Places on the backend: type-ahead suggestions (Ladakh, Pangong Lake...) plus ready
+ *  results for generic queries ("hill stations near Bengaluru"). Otherwise the Open-Meteo search. */
 export function PlacePicker({ open, onClose, onPick, exclude, title, prefer }: {
   open: boolean; onClose: () => void; onPick: (p: Place) => void; exclude: Place; title: string; prefer?: string;
 }) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<Place[] | null>(null);
+  const [suggestions, setSuggestions] = useState<PlaceSuggestion[]>([]);
   const [state, setState] = useState<"idle" | "loading" | "error">("idle");
   const [error, setError] = useState("");
+  const [resolving, setResolving] = useState<string | null>(null);
+  const session = useRef(newSession());
   const ctl = useRef<AbortController | null>(null);
-  useEffect(() => { if (open) { setQ(""); setResults(null); setState("idle"); } }, [open]);
+  useEffect(() => {
+    if (open) { setQ(""); setResults(null); setSuggestions([]); setState("idle"); setResolving(null); session.current = newSession(); }
+  }, [open]);
 
   useEffect(() => {
     const term = q.trim();
     ctl.current?.abort();
-    if (term.length < 2) { setResults(null); setState("idle"); return; }
+    if (term.length < 2) { setResults(null); setSuggestions([]); setState("idle"); return; }
     const c = new AbortController();
     ctl.current = c;
     setState("loading");
     const id = window.setTimeout(() => {
-      api.searchPlaces(term, c.signal, prefer)
-        .then((r) => { setResults(r.results.map(fromResult)); setState("idle"); })
+      api.autocompletePlaces(term, session.current, c.signal, prefer)
+        .then((r) => { setResults(r.results.map(fromResult)); setSuggestions(r.suggestions); setState("idle"); })
+        .catch(() => {
+          if (c.signal.aborted) return;
+          // Older backend without /autocomplete: plain search
+          return api.searchPlaces(term, c.signal, prefer)
+            .then((r) => { setResults(r.results.map(fromResult)); setSuggestions([]); setState("idle"); });
+        })
         .catch((e: Error) => { if (e.name !== "AbortError") { setState("error"); setError(e.message); } });
-    }, 250);
+    }, 220);
     return () => { window.clearTimeout(id); c.abort(); };
   }, [q, prefer]);
 
   const quick = useMemo(() => {
     const s = q.trim().toLowerCase();
     return PLACES.filter((p) => placeKey(p) !== placeKey(exclude))
-      .filter((p) => !s || `${p.city} ${p.country} ${p.iata ?? ""}`.toLowerCase().includes(s));
+      .filter((p) => !s || `${p.city} ${p.region ?? ""} ${p.country} ${p.iata ?? ""}`.toLowerCase().includes(s));
   }, [q, exclude]);
   const pick = (p: Place) => { onPick(p); onClose(); };
+  const pickSuggestion = async (sg: PlaceSuggestion) => {
+    setResolving(sg.place_id);
+    try {
+      const r = await api.placeDetails(sg.place_id, session.current);
+      session.current = newSession();   // a session ends with its details call
+      pick(fromResult(r));
+    } catch (e) {
+      setState("error"); setError((e as Error).message);
+    } finally {
+      setResolving(null);
+    }
+  };
   const live = (results ?? []).filter((p) => placeKey(p) !== placeKey(exclude));
-  const shownKeys = new Set(live.map((p) => p.city.toLowerCase()));
+  const shownKeys = new Set([...live.map((p) => p.city.toLowerCase()), ...suggestions.map((s) => s.title.toLowerCase())]);
+  const extraQuick = quick.filter((p) => !shownKeys.has(p.city.toLowerCase()));
+  const nothing = results !== null && !live.length && !suggestions.length && state === "idle";
 
   return (
     <Sheet open={open} onClose={onClose} title={title}>
       <label className="search">
         <Icon name="search" size={18} />
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="City, state or region, e.g. Goa"
+        <input value={q} onChange={(e) => setQ(e.target.value)}
+          placeholder="City, region or landmark, e.g. Ladakh, Pangong Lake, hill stations near Bengaluru"
           aria-label="Search places" />
       </label>
       {state === "loading" && <p className="place-list__status">Searching…</p>}
       {state === "error" && <p className="place-list__status is-error">City search is unavailable: {error}</p>}
-      <ul className="place-list">
-        {live.map((p) => <PlaceRow key={placeKey(p)} p={p} onPick={pick} />)}
-        {results && !live.length && state === "idle" && <li className="place-list__none">Nothing called “{q.trim()}” found.</li>}
-      </ul>
-      {quick.filter((p) => !shownKeys.has(p.city.toLowerCase())).length > 0 && (
+      {suggestions.length > 0 && (
+        <ul className="place-list">
+          {suggestions.map((sg) => <SuggestionRow key={sg.place_id} s={sg} onPick={pickSuggestion} resolving={resolving === sg.place_id} />)}
+        </ul>
+      )}
+      {live.length > 0 && (
+        <>
+          {suggestions.length > 0 && <p className="place-list__head">Places matching “{q.trim()}”</p>}
+          <ul className="place-list">
+            {live.map((p) => <PlaceRow key={placeKey(p)} p={p} onPick={pick} />)}
+          </ul>
+        </>
+      )}
+      {nothing && <p className="place-list__none">Nothing called “{q.trim()}” found.</p>}
+      {extraQuick.length > 0 && (
         <>
           <p className="place-list__head">{q.trim().length >= 2 ? "Also matching" : "Popular"}</p>
           <ul className="place-list">
-            {quick.filter((p) => !shownKeys.has(p.city.toLowerCase())).map((p) => <PlaceRow key={placeKey(p)} p={p} onPick={pick} />)}
+            {extraQuick.map((p) => <PlaceRow key={placeKey(p)} p={p} onPick={pick} />)}
           </ul>
         </>
       )}
@@ -148,7 +210,7 @@ export function Composer({ draft, setDraft, onSubmit, apiOnline, banner, onDismi
           </button>
         </h1>
         <p className="hero__meta">
-          <span>{[to.kind === "region" ? (to.base ? `Region, based in ${to.base}` : "Region") : to.region, to.country].filter(Boolean).join(", ")}</span>
+          <span>{[to.kind === "region" ? (to.base ? `Region, based in ${to.base}` : "Region") : to.kind === "landmark" ? (to.region ? `Near ${to.region}` : "Landmark") : to.region, to.country].filter(Boolean).join(", ")}</span>
           <span className="num">{coord(to.lat, to.lon)}</span>
           {localTime && <span className="num" title={to.tz}>{localTime} local time</span>}
         </p>

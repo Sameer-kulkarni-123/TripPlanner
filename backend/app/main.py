@@ -39,6 +39,7 @@ def health_check():
         "status": "healthy",
         "service": settings.PROJECT_NAME,
         "version": "0.1.0",
+        "groq_configured": bool(settings.GROQ_API_KEY.strip()),
         "gemini_configured": bool(settings.GEMINI_API_KEY.strip()),
         "nuitee_configured": bool(settings.NUITEE_API_KEY.strip()),
         "tavily_configured": bool(settings.TAVILY_API_KEY.strip()),

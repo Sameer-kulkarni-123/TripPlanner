@@ -1,5 +1,10 @@
-// A day's stops drawn to scale from their real coordinates (no map tiles, no third-party SDK).
-// Straight segments show visiting order only; travel times come from the itinerary agent.
+// A day's stops on a real map (Leaflet + OpenStreetMap data, CARTO dark tiles), joined in visiting
+// order along actual roads/paths from the free OSRM routing service run by FOSSGIS
+// (routing.openstreetmap.de). If routing is unavailable the stops are joined by straight dashed
+// lines and the caption says so. Travel times shown in the timeline still come from the itinerary agent.
+import { useEffect, useMemo, useRef, useState } from "react";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
 
 export interface MapStop {
   id: string;
@@ -10,68 +15,144 @@ export interface MapStop {
   n?: number;
 }
 
-const W = 640, H = 230, PAD = 34;
-const NICE_KM = [0.2, 0.5, 1, 2, 5, 10, 20, 50];
+type Route = { coords: [number, number][]; km: number; minutes: number; profile: "foot" | "car" } | null;
+
+// OpenStreetMap's own tiles (free, no key; CARTO's basemaps now need an API key). They are light,
+// so .lmap__map darkens them with a CSS filter to match the app.
+const TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+const ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+const routeCache = new Map<string, Route>();
+
+function straightKm(stops: MapStop[]) {
+  let km = 0;
+  for (let i = 1; i < stops.length; i++) {
+    const a = stops[i - 1], b = stops[i];
+    const dLat = ((b.lat - a.lat) * Math.PI) / 180, dLon = ((b.lon - a.lon) * Math.PI) / 180;
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos((a.lat * Math.PI) / 180) * Math.cos((b.lat * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
+    km += 12742 * Math.asin(Math.sqrt(h));
+  }
+  return km;
+}
+
+/** Road/path geometry through the stops in order. Walking paths for compact days, roads otherwise. */
+async function fetchRoute(stops: MapStop[], signal: AbortSignal): Promise<Route> {
+  if (stops.length < 2) return null;
+  const profile: "foot" | "car" = straightKm(stops) / (stops.length - 1) < 2.5 ? "foot" : "car";
+  const coords = stops.map((s) => `${s.lon.toFixed(5)},${s.lat.toFixed(5)}`).join(";");
+  const key = `${profile}:${coords}`;
+  if (routeCache.has(key)) return routeCache.get(key)!;
+  const url = `https://routing.openstreetmap.de/routed-${profile}/route/v1/${profile === "foot" ? "foot" : "driving"}/${coords}?overview=full&geometries=geojson`;
+  const res = await fetch(url, { signal });
+  if (!res.ok) throw new Error(`routing HTTP ${res.status}`);
+  const j = await res.json();
+  const r = j?.routes?.[0];
+  if (!r?.geometry?.coordinates?.length) throw new Error("no route");
+  const route: Route = {
+    coords: (r.geometry.coordinates as [number, number][]).map(([lon, lat]) => [lat, lon]),
+    km: r.distance / 1000,
+    minutes: r.duration / 60,
+    profile,
+  };
+  routeCache.set(key, route);
+  return route;
+}
+
+function icon(s: MapStop, on: boolean) {
+  const html = s.kind === "hotel"
+    ? `<span class="lmap__pin lmap__pin--hotel${on ? " is-active" : ""}">H</span>`
+    : `<span class="lmap__pin${on ? " is-active" : ""}">${s.n ?? ""}</span>`;
+  return L.divIcon({ html, className: "lmap__icon", iconSize: [28, 28], iconAnchor: [14, 14] });
+}
 
 export function RouteMap({ stops, active, onHover }: {
   stops: MapStop[];
   active?: string | null;
   onHover?: (id: string | null) => void;
 }) {
-  if (stops.length === 0) return null;
-  const lat0 = stops.reduce((s, p) => s + p.lat, 0) / stops.length;
-  const k = Math.cos((lat0 * Math.PI) / 180);
-  const pts = stops.map((s) => ({ ...s, x: s.lon * k, y: -s.lat }));
-  const minX = Math.min(...pts.map((p) => p.x)), maxX = Math.max(...pts.map((p) => p.x));
-  const minY = Math.min(...pts.map((p) => p.y)), maxY = Math.max(...pts.map((p) => p.y));
-  const spanX = Math.max(maxX - minX, 0.004), spanY = Math.max(maxY - minY, 0.004);
-  const scale = Math.min((W - PAD * 2) / spanX, (H - PAD * 2) / spanY);
-  const offX = (W - spanX * scale) / 2, offY = (H - spanY * scale) / 2;
-  const P = pts.map((p) => ({ ...p, px: offX + (p.x - minX) * scale, py: offY + (p.y - minY) * scale }));
+  const el = useRef<HTMLDivElement>(null);
+  const map = useRef<L.Map | null>(null);
+  const markers = useRef(new Map<string, L.Marker>());
+  const line = useRef<L.Polyline | null>(null);
+  const [route, setRoute] = useState<Route | "loading" | "failed">("loading");
+  const hover = useRef(onHover);
+  hover.current = onHover;
 
-  const pxPerKm = scale / 111.32;
-  const barKm = [...NICE_KM].reverse().find((km) => km * pxPerKm <= W * 0.22) ?? NICE_KM[0];
-  const barPx = barKm * pxPerKm;
+  const sig = useMemo(() => stops.map((s) => `${s.id}@${s.lat.toFixed(5)},${s.lon.toFixed(5)}`).join("|"), [stops]);
 
-  const path = P.map((p, i) => `${i ? "L" : "M"}${p.px.toFixed(1)} ${p.py.toFixed(1)}`).join(" ");
+  // Create the map once
+  useEffect(() => {
+    if (!el.current || map.current) return;
+    const m = L.map(el.current, { zoomControl: true, scrollWheelZoom: false, attributionControl: false });
+    // Plain "Leaflet" credit, without the flag icon Leaflet adds by default
+    L.control.attribution({ prefix: '<a href="https://leafletjs.com">Leaflet</a>' }).addTo(m);
+    L.tileLayer(TILES, { attribution: ATTRIBUTION, maxZoom: 19 }).addTo(m);
+    m.on("focus", () => m.scrollWheelZoom.enable());
+    m.on("blur", () => m.scrollWheelZoom.disable());
+    map.current = m;
+    return () => { m.remove(); map.current = null; markers.current.clear(); line.current = null; };
+  }, []);
+
+  // Pins + fit to the day's stops
+  useEffect(() => {
+    const m = map.current;
+    if (!m) return;
+    markers.current.forEach((mk) => mk.remove());
+    markers.current.clear();
+    stops.forEach((s) => {
+      const mk = L.marker([s.lat, s.lon], { icon: icon(s, false), keyboard: true, title: s.label, zIndexOffset: s.kind === "hotel" ? 500 : 0 })
+        .bindTooltip(s.kind === "hotel" ? s.label : `${s.n}. ${s.label}`, { direction: "top", offset: [0, -12] })
+        .on("mouseover", () => hover.current?.(s.id))
+        .on("mouseout", () => hover.current?.(null))
+        .addTo(m);
+      markers.current.set(s.id, mk);
+    });
+    const b = L.latLngBounds(stops.map((s) => [s.lat, s.lon] as [number, number]));
+    if (stops.length === 1) m.setView(b.getCenter(), 14);
+    else m.fitBounds(b, { padding: [36, 36], maxZoom: 16 });
+
+  }, [sig]);
+
+  // Route along roads; straight dashed lines while loading or if routing fails
+  useEffect(() => {
+    const c = new AbortController();
+    setRoute("loading");
+    fetchRoute(stops, c.signal).then(setRoute).catch(() => { if (!c.signal.aborted) setRoute("failed"); });
+    return () => c.abort();
+
+  }, [sig]);
+
+  useEffect(() => {
+    const m = map.current;
+    if (!m) return;
+    line.current?.remove();
+    if (stops.length < 2) return;
+    const real = route && route !== "loading" && route !== "failed" ? route : null;
+    line.current = real
+      ? L.polyline(real.coords, { className: "lmap__route", weight: 4, opacity: 0.95 })
+      : L.polyline(stops.map((s) => [s.lat, s.lon] as [number, number]), { className: "lmap__route lmap__route--straight", weight: 2.5, dashArray: "4 8" });
+    line.current.addTo(m);
+    line.current.bringToBack();
+  }, [route, sig]);
+
+  // Highlight the stop hovered in the timeline
+  useEffect(() => {
+    markers.current.forEach((mk, id) => {
+      const s = stops.find((x) => x.id === id);
+      if (s) mk.setIcon(icon(s, id === active));
+      if (id === active) mk.setZIndexOffset(1000); else mk.setZIndexOffset(s?.kind === "hotel" ? 500 : 0);
+    });
+  }, [active, sig]);
+
+  const n = stops.filter((s) => s.kind === "stop").length;
+  const caption = stops.length < 2 ? null
+    : route === "loading" ? "Finding the route…"
+      : route === "failed" || !route ? "Straight lines show visiting order (road routing unavailable)."
+        : `${route.profile === "foot" ? "Walking" : "Road"} route in visiting order, about ${route.km < 10 ? route.km.toFixed(1) : Math.round(route.km)} km.`;
 
   return (
-    <figure className="routemap">
-      <svg viewBox={`0 0 ${W} ${H}`} role="img"
-        aria-label={`Map of ${stops.filter((s) => s.kind === "stop").length} stops, to scale`}>
-        <defs>
-          <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
-            <path d="M32 0H0V32" fill="none" className="routemap__grid" />
-          </pattern>
-        </defs>
-        <rect width={W} height={H} fill="url(#grid)" />
-        {P.length > 1 && <path d={path} className="routemap__path" />}
-        {P.map((p) => {
-          const on = active === p.id;
-          return (
-            <g key={p.id} transform={`translate(${p.px.toFixed(1)} ${p.py.toFixed(1)})`}
-              className={`routemap__pt routemap__pt--${p.kind} ${on ? "is-active" : ""}`}
-              onMouseEnter={() => onHover?.(p.id)} onMouseLeave={() => onHover?.(null)}>
-              <title>{p.label}</title>
-              {p.kind === "hotel" ? (
-                <>
-                  <rect x={-9} y={-9} width={18} height={18} rx={3} />
-                  <text y={4}>H</text>
-                </>
-              ) : (
-                <>
-                  <circle r={on ? 13 : 11} />
-                  <text y={4}>{p.n}</text>
-                </>
-              )}
-            </g>
-          );
-        })}
-        <g transform={`translate(${W - PAD - barPx} ${H - 14})`} className="routemap__scale">
-          <path d={`M0 -4V0H${barPx.toFixed(1)}V-4`} />
-          <text x={barPx / 2} y={-8}>{barKm < 1 ? `${barKm * 1000} m` : `${barKm} km`}</text>
-        </g>
-      </svg>
+    <figure className="lmap">
+      <div ref={el} className="lmap__map" role="region" aria-label={`Map of ${n} stops`} tabIndex={0} />
+      {caption && <figcaption className="lmap__caption">{caption}</figcaption>}
     </figure>
   );
 }

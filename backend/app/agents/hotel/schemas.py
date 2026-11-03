@@ -80,6 +80,11 @@ class HotelSearchRequest(BaseModel):
     rooms: List[RoomOccupancy] = Field(default_factory=lambda: [RoomOccupancy()], min_length=1)
     currency: str = Field(default="USD")
     guest_nationality: str = Field(default="US", description="ISO-2 nationality; affects provider rates")
+    latitude: Optional[float] = Field(default=None, ge=-90, le=90,
+                                      description="Destination centre. When set, hotels are searched by radius "
+                                                  "around it instead of by city name (needed for regions/landmarks)")
+    longitude: Optional[float] = Field(default=None, ge=-180, le=180)
+    radius_km: Optional[float] = Field(default=None, ge=1, le=100, description="Search radius around latitude/longitude")
     constraints: HotelSearchConstraints = Field(default_factory=HotelSearchConstraints)
     preferences: HotelPreferences = Field(default_factory=HotelPreferences)
     max_results: int = Field(default=20, ge=1, le=100)

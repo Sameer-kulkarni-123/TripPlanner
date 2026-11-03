@@ -1,4 +1,8 @@
-"""Place search for any city, state or region: coordinates, time zone and the airport to fly into.
+"""Place search for any city, state, region or landmark: coordinates, time zone and the airport to fly into.
+
+- With GOOGLE_MAPS_API_KEY set, Google Places (app/integrations/google_places.py) does the searching:
+  type-ahead suggestions, regions like Ladakh, landmarks like Pangong Lake and generic queries like
+  "hill stations near Bengaluru". Everything below is the free fallback used without a key.
 
 - Places come from the Open-Meteo geocoding API (GeoNames data, no key needed for
   non-commercial use): https://open-meteo.com/en/docs/geocoding-api
@@ -13,6 +17,7 @@
   and each one is kept only if the geocoder confirms a real place near it.
 """
 import asyncio
+import difflib
 import logging
 import math
 import re
@@ -48,6 +53,18 @@ REGION_HUBS = {
     ("sikkim", "IN"): (27.3389, 88.6065, "Gangtok"),
     ("kerala", "IN"): (9.9312, 76.2673, "Kochi"),
     ("bali", "ID"): (-8.5069, 115.2625, "Ubud"),
+    ("jammu and kashmir", "IN"): (34.0837, 74.7973, "Srinagar"),
+    ("kashmir", "IN"): (34.0837, 74.7973, "Srinagar"),
+    ("himachal pradesh", "IN"): (32.2432, 77.1892, "Manali"),
+    ("spiti", "IN"): (32.2276, 78.0710, "Kaza"),
+    ("spiti valley", "IN"): (32.2276, 78.0710, "Kaza"),
+    ("uttarakhand", "IN"): (30.0869, 78.2676, "Rishikesh"),
+    ("rajasthan", "IN"): (26.9124, 75.7873, "Jaipur"),
+    ("meghalaya", "IN"): (25.5788, 91.8933, "Shillong"),
+    ("lakshadweep", "IN"): (10.5667, 72.6417, "Kavaratti"),
+    ("andaman islands", "IN"): (11.6234, 92.7265, "Sri Vijaya Puram (Port Blair)"),
+    ("nilgiris", "IN"): (11.4102, 76.6950, "Ooty"),
+    ("the nilgiris", "IN"): (11.4102, 76.6950, "Ooty"),
 }
 
 _airports: Optional[List[Dict[str, Any]]] = None
@@ -154,13 +171,17 @@ def _rank(results: List[Dict[str, Any]], query: str, prefer: Optional[str]) -> L
 
     def key(item):
         i, r = item
-        exact = _norm(r.get("name")) == q
+        n = _norm(r.get("name"))
+        exact = n == q
+        # Exact name first; whole-word / near matches next; loose fuzzy hits (a different place that
+        # merely resembles the query, e.g. "Ladakh" -> the Odisha village "Ladakhaman") go last.
+        close = exact or q in n.split() or difflib.SequenceMatcher(None, n, q).ratio() >= 0.85
         pop = r.get("population") or 0
         if _kind(r.get("feature_code")) == "region":
             pop = max(pop, REGION_POPULATION_FLOOR)
         if pref and (r.get("country_code") or "").upper() == pref:
             pop *= PREFERRED_COUNTRY_WEIGHT
-        return (0 if exact else 1, -pop, i)
+        return (0 if exact else 1 if close else 2, -pop, i)
 
     return [r for _, r in sorted(enumerate(results), key=key)]
 
@@ -229,18 +250,59 @@ def _useful(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [r for r in rows if r.get("feature_code") in _POPULATED or r.get("feature_code") in _REGIONS] or rows
 
 
+def _hub_keys(query: str) -> List[tuple]:
+    """REGION_HUBS entries whose name equals the query, or starts with it (3+ letters) while typing."""
+    q = _norm(query.split(",")[0])
+    if len(q) < 3:
+        return []
+    return [k for k in REGION_HUBS if k[0] == q or k[0].startswith(q)]
+
+
+async def _hub_places(query: str, airports: List[Dict[str, Any]], country_code: Optional[str]) -> List[Dict[str, Any]]:
+    """Known regions the geocoder lacks (e.g. Ladakh): build them from the base town's geocoder record."""
+    out: List[Dict[str, Any]] = []
+    for name, cc in _hub_keys(query):
+        if country_code and country_code.upper() != cc:
+            continue
+        lat, lon, base = REGION_HUBS[(name, cc)]
+        base_name = base.split("(")[-1].rstrip(")") if "(" in base else base
+        try:
+            hits = await _geocode(base_name, 5, cc)
+        except PlacesError:
+            continue
+        if not hits:
+            continue
+        near = min(hits, key=lambda h: _km(lat, lon, h["latitude"], h["longitude"]))
+        rec = {**near, "name": name.title(), "admin1": None}   # keep tz/country, label it as the region
+        place = _to_place(rec, airports, source="Known region, base town confirmed with Open-Meteo geocoding")
+        out.append(place)
+    return out
+
+
 async def search_places(query: str, count: int = 8, country_code: Optional[str] = None,
                         prefer: Optional[str] = None, use_ai: bool = True) -> List[Dict[str, Any]]:
     """Places matching a name. ``country_code`` filters; ``prefer`` only ranks that country higher."""
     q = (query or "").strip()
     if len(q) < 2:
         return []
+    from app.integrations import google_places as gpl
+    if gpl.is_configured() and not country_code:
+        try:
+            hits = await google_search_places(q, count=count, prefer=prefer)
+            if hits:
+                return hits
+        except gpl.GooglePlacesError as e:
+            logger.warning("Google Places search failed, falling back to Open-Meteo: %s", e)
     raw = await _geocode(q, count, country_code)
     if not raw and "," in q:
         raw = await _geocode(q.split(",")[0].strip(), count, country_code)
     ranked = _dedupe(_rank(_useful(raw), q, prefer))
     airports = await _load_airports()
     places = [_to_place(r, airports) for r in ranked[:count]]
+    hubs = await _hub_places(q, airports, country_code)
+    if hubs:   # curated regions lead; drop geocoder rows that are the same place
+        places = hubs + [p for p in places if not any(p["city"] == h["city"] and p["country_code"] == h["country_code"] for h in hubs)]
+        places = places[:count]
     if not places and use_ai:
         places = await resolve_with_gemini(q, prefer=prefer or country_code, airports=airports)
     return places
@@ -260,13 +322,13 @@ Return JSON: {{"candidates": [{{"name": str, "kind": "city" or "region", "countr
 async def resolve_with_gemini(query: str, *, prefer: Optional[str] = None,
                               airports: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     """Ask Gemini what the traveller meant, then keep only candidates the geocoder confirms nearby."""
-    from app.integrations import gemini  # local import: place search works without Gemini
+    from app.integrations import llm  # local import: place search works without a language model
 
-    if not gemini.is_configured():
+    if not llm.is_configured():
         return []
     try:
-        raw = await gemini.generate_json(_resolver_prompt(query, prefer), temperature=0.0, timeout=30)
-    except gemini.GeminiError as e:
+        raw = await llm.generate_json(_resolver_prompt(query, prefer), temperature=0.0, timeout=30)
+    except llm.LLMError as e:
         logger.info("Gemini place resolver unavailable: %s", e)
         return []
     cands = raw.get("candidates") if isinstance(raw, dict) else None
@@ -305,3 +367,92 @@ async def resolve_with_gemini(query: str, *, prefer: Optional[str] = None,
         if not any(p["city"] == place["city"] and p["country_code"] == place["country_code"] for p in out):
             out.append(place)
     return out
+
+
+# ------------------------------------------------------------------ Google Places (when configured)
+async def _from_google(gp: Dict[str, Any], airports: List[Dict[str, Any]],
+                       source: str = "Google Places") -> Optional[Dict[str, Any]]:
+    """A Google place -> the same shape as the Open-Meteo results above."""
+    from app.integrations import google_places as gpl
+
+    loc = gp.get("location") or {}
+    lat, lon = _num(loc.get("latitude")), _num(loc.get("longitude"))
+    if lat is None or lon is None:
+        return None
+    name = (gp.get("displayName") or {}).get("text") or gp.get("formattedAddress") or ""
+    comps = gpl.components(gp)
+    cc = comps["country_code"] or ""
+    kind = gpl.kind_of(gp.get("types") or [])
+    base = None
+    hub = REGION_HUBS.get((_norm(name), cc))
+    if hub:
+        lat, lon, base = hub
+        kind = "region"
+    # Landmarks are shown with their town ("Pangong Lake, Ladakh"); cities with their state
+    region = comps["admin1"] if kind != "landmark" else (comps["locality"] or comps["admin1"])
+    if region == name:
+        region = None
+    return {
+        "city": name,
+        "region": region,
+        "country": comps["country"],
+        "country_code": cc,
+        "latitude": lat,
+        "longitude": lon,
+        "timezone": await gpl.timezone_for(lat, lon),
+        "population": None,
+        "kind": kind,
+        "base": base,
+        "address": gp.get("formattedAddress"),
+        "place_id": gp.get("id"),
+        "airport": nearest_airport(lat, lon, cc, airports) if airports else None,
+        "source": source,
+    }
+
+
+async def google_search_places(query: str, count: int = 8, prefer: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Full places (with coordinates) for a free-text query, via Google Text Search."""
+    from app.integrations import google_places as gpl
+
+    rows = await gpl.text_search(query, prefer=prefer, count=count)
+    airports = await _load_airports()
+    out: List[Dict[str, Any]] = []
+    for gp in rows:
+        p = await _from_google(gp, airports, source="Google Places text search")
+        if p and not any(o["city"] == p["city"] and o["country_code"] == p["country_code"] for o in out):
+            out.append(p)
+    return out[:count]
+
+
+async def suggest_places(query: str, session: Optional[str] = None, prefer: Optional[str] = None,
+                         count: int = 8) -> Dict[str, Any]:
+    """For the type-ahead picker.
+    With Google: {"suggestions": [...no coordinates, resolve with place_details...], "results": [...]}
+    where "results" holds ready places for generic queries ("beaches near Goa").
+    Without Google: {"suggestions": [], "results": <Open-Meteo search>}."""
+    from app.integrations import google_places as gpl
+
+    if not gpl.is_configured():
+        return {"provider": "open-meteo", "suggestions": [], "results": await search_places(query, count, prefer=prefer)}
+    try:
+        suggestions = await gpl.autocomplete(query, session=session, prefer=prefer, count=count)
+        results = await google_search_places(query, count=6, prefer=prefer) if gpl.is_generic_query(query) else []
+    except gpl.GooglePlacesError as e:
+        logger.warning("Google Places unavailable, using Open-Meteo: %s", e)
+        return {"provider": "open-meteo", "suggestions": [], "results": await search_places(query, count, prefer=prefer)}
+    # Don't list a place twice when text search already resolved it
+    have = {r.get("place_id") for r in results}
+    return {"provider": "google", "suggestions": [s for s in suggestions if s["place_id"] not in have], "results": results}
+
+
+async def place_details(place_id: str, session: Optional[str] = None) -> Dict[str, Any]:
+    from app.integrations import google_places as gpl
+
+    try:
+        gp = await gpl.details(place_id, session=session)
+    except gpl.GooglePlacesError as e:
+        raise PlacesError(str(e)) from e
+    place = await _from_google(gp, await _load_airports())
+    if not place:
+        raise PlacesError("Google Places returned no coordinates for that place.")
+    return place

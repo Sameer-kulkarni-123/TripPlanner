@@ -78,6 +78,9 @@ export interface HotelSearchRequest {
   rooms: { adults: number; children_ages: number[] }[];
   currency: string;
   guest_nationality?: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  radius_km?: number | null;
   constraints?: {
     max_total_price?: number | null;
     min_star_rating?: number | null;
@@ -279,6 +282,24 @@ export interface ItineraryResult {
 }
 
 // ---------------------------------------------------------------- Places + assistant (api/places.py, api/assistant.py)
+export type PlaceKind = "city" | "region" | "landmark";
+
+/** A Google Places type-ahead suggestion: no coordinates until resolved with /places/details. */
+export interface PlaceSuggestion {
+  place_id: string;
+  title: string;
+  subtitle?: string | null;
+  kind: PlaceKind;
+  types: string[];
+}
+
+export interface PlaceAutocomplete {
+  query: string;
+  provider: "google" | "open-meteo";
+  suggestions: PlaceSuggestion[];
+  results: PlaceResult[];
+}
+
 export interface PlaceResult {
   city: string;
   region?: string | null;
@@ -288,8 +309,10 @@ export interface PlaceResult {
   longitude: number;
   timezone?: string | null;
   population?: number | null;
-  kind?: "city" | "region";
+  kind?: PlaceKind;
   base?: string | null;
+  address?: string | null;
+  place_id?: string | null;
   source?: string;
   airport?: { code: string; name: string; distance_km: number } | null;
 }

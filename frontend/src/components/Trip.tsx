@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { HotelOption, HotelPriority, ItineraryRequest, ItineraryResult, TransportOption } from "../api/types";
+import type { HotelOption, ItineraryRequest, ItineraryResult, TransportOption } from "../api/types";
 import { dateRange, money, plural } from "../lib/format";
 import {
-  hotelRequest, referencePoints, tripCost, withSelection, type Selection, type Settled, type TripData,
+  hotelRadiusKm, hotelRequest, referencePoints, tripCost, withSelection, type Selection, type Settled, type TripData,
 } from "../lib/trip";
 import { Checks } from "./Checks";
 import { Flights } from "./Flights";
@@ -33,7 +33,6 @@ export function Trip({ data, onEdit }: { data: TripData; onEdit: () => void }) {
   const [req, setReq] = useState<ItineraryRequest>(data.itinRequest);
   const [sel, setSel] = useState<Selection>({ out: null, back: null, hotel: null });
   const [hotels, setHotels] = useState(data.hotels);
-  const [hotelPriority, setHotelPriority] = useState<HotelPriority>(draft.hotelPriority);
   const [busy, setBusy] = useState(false);
   const [reloadingStays, setReloadingStays] = useState(false);
   const [notice, setNotice] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
@@ -74,12 +73,15 @@ export function Trip({ data, onEdit }: { data: TripData; onEdit: () => void }) {
   const pickFlight = (dir: "out" | "back", o: TransportOption | null) => applySelection({ ...sel, [dir]: o });
   const pickHotel = (h: HotelOption | null) => applySelection({ ...sel, hotel: h });
 
-  const rerankStays = async (p: HotelPriority) => {
-    setHotelPriority(p);
+  // "Search a wider area": same stay, radius widened (few or no budget stays near the centre)
+  const [radiusKm, setRadiusKm] = useState(() => hotelRadiusKm(draft.to));
+  const searchWider = async () => {
+    const next = Math.min(100, Math.round(radiusKm * 2.5));
     setReloadingStays(true);
     try {
-      const r = await api.searchHotels(hotelRequest(draft, referencePoints(itin, draft), p));
+      const r = await api.searchHotels(hotelRequest(draft, referencePoints(itin, draft), draft.hotelPriority, next));
       setHotels({ ok: true, data: r });
+      setRadiusKm(next);
     } catch (e) {
       setHotels({ ok: false, error: (e as Error).message } as Settled<never>);
     } finally {
@@ -103,8 +105,9 @@ export function Trip({ data, onEdit }: { data: TripData; onEdit: () => void }) {
       selOut={sel.out} selBack={sel.back} onSelect={pickFlight} busy={busy} />
   );
   const staysPanel = (
-    <Stays res={hotels} selected={sel.hotel} onSelect={pickHotel} busy={busy} priority={hotelPriority}
-      onPriority={rerankStays} checkIn={draft.start} checkOut={draft.end} reloading={reloadingStays} />
+    <Stays res={hotels} selected={sel.hotel} onSelect={pickHotel} busy={busy}
+      checkIn={draft.start} checkOut={draft.end} reloading={reloadingStays}
+      radiusKm={radiusKm} onSearchWider={radiusKm < 100 ? searchWider : undefined} />
   );
   const tipsPanel = <Tips res={data.tips} city={to.city} />;
   const checksPanel = itin

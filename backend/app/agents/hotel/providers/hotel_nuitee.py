@@ -132,6 +132,8 @@ class NuiteeHotelProvider(BaseHotelProvider):
         }
         if hotel_ids:
             payload["hotelIds"] = hotel_ids
+        elif request.latitude is not None and request.longitude is not None:
+            payload.update(self._geo_params(request))
         else:
             payload["cityName"] = request.destination
             payload["countryCode"] = request.country_code.upper()
@@ -163,15 +165,34 @@ class NuiteeHotelProvider(BaseHotelProvider):
 
         return self._parse_rates_response(data, request, static)
 
+    @staticmethod
+    def _geo_params(request: HotelSearchRequest) -> Dict[str, Any]:
+        radius_km = request.radius_km or settings.HOTEL_SEARCH_RADIUS_KM
+        return {
+            "latitude": request.latitude,
+            "longitude": request.longitude,
+            "radius": int(max(1000, radius_km * 1000)),   # LiteAPI wants metres, minimum 1000
+        }
+
     async def _fetch_static_hotels(
         self, client: httpx.AsyncClient, request: HotelSearchRequest
     ) -> Dict[str, Dict[str, Any]]:
-        params = {
+        """Hotel list for the destination. Searches by radius around its coordinates when known
+        (finds guesthouses and homestays outside the 'city' and works for regions like Ladakh),
+        then falls back to the city name."""
+        if request.latitude is not None and request.longitude is not None:
+            found = await self._fetch_static_page(client, {**self._geo_params(request), "limit": self.max_hotels})
+            if found:
+                return found
+            self.last_notes.append("No hotels listed around the destination's coordinates; searched by city name instead.")
+        return await self._fetch_static_page(client, {
             "countryCode": request.country_code.upper(),
             "cityName": request.destination,
             "limit": self.max_hotels,
             "offset": 0,
-        }
+        })
+
+    async def _fetch_static_page(self, client: httpx.AsyncClient, params: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         try:
             resp = await client.get(f"{self.base_url}/data/hotels", params=params, headers=self._headers)
         except httpx.HTTPError as e:

@@ -85,9 +85,10 @@ def rank_hotel_options(options: List[HotelOption], preferences: HotelPreferences
     for opt, price in zip(options, prices):
         parts: Dict[str, float] = {"C": _normalize_min_better(price, min_p, max_p)}
         if "Q" in weights:
-            # Unknown star rating among rated options gets a neutral 0.0 star (penalized, flagged)
-            s = opt.star_rating if opt.star_rating is not None else 0.0
-            parts["Q"] = _normalize_max_better(s, min(stars), max(stars)) if opt.star_rating is not None else 0.0
+            # Unknown star rating: neutral middle score. Many budget guesthouses and homestays are simply
+            # unrated, and scoring them as zero stars pushed every cheap stay off the list.
+            parts["Q"] = (_normalize_max_better(opt.star_rating, min(stars), max(stars))
+                          if opt.star_rating is not None else 0.5)
         if "L" in weights:
             d: Optional[float] = opt.distance_km_to_reference
             parts["L"] = _normalize_min_better(d, min(dists), max(dists)) if d is not None else 0.0
